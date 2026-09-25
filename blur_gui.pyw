@@ -1,5 +1,4 @@
-"""Drag-and-drop GUI wrapper for deface. Cross-platform dark-mode UI."""
-import os
+"""Simple drag-and-drop GUI wrapper for deface (default theme)."""
 import platform
 import queue
 import re
@@ -11,9 +10,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import (
     BooleanVar, DoubleVar, StringVar, Tk,
-    filedialog, messagebox, ttk, END, NORMAL, DISABLED,
+    filedialog, messagebox, ttk,
 )
-from tkinter.scrolledtext import ScrolledText
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -25,68 +23,46 @@ IS_WIN = platform.system() == "Windows"
 IS_MAC = platform.system() == "Darwin"
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mpg", ".mpeg", ".wmv", ".flv"}
-HERE = Path(__file__).resolve().parent
-DEFAULT_OUTPUT = HERE / "output"
-SCRIPTS_DIR = Path(os.environ.get("APPDATA", "")) / "Python" / "Python313" / "Scripts"
 
 WIN_TITLE = "blur faces - free, local, no cap"
 
-# theme
-BG = "#0b0b14"
-CARD = "#161624"
-CARD_HI = "#1f1f30"
-BORDER = "#2a2a40"
-TEXT = "#f5f5fa"
-DIM = "#8a8aa3"
-ACCENT = "#a78bfa"
-ACCENT_HOT = "#c4a8ff"
-PINK = "#ec4899"
-GREEN = "#34d399"
-YELLOW = "#fbbf24"
-RED = "#f87171"
+# Fixed values for options removed from the UI.
+MASK_SCALE = 1.3
+MOSAIC_SIZE = "20"
 
-if IS_MAC:
-    _DISPLAY = "SF Pro Display"
-    _TEXT = "SF Pro Text"
-    _MONO = "SF Mono"
-elif IS_WIN:
-    _DISPLAY = "Segoe UI Variable Display"
-    _TEXT = "Segoe UI Variable"
-    _MONO = "Cascadia Mono"
-else:
-    _DISPLAY = "DejaVu Sans"
-    _TEXT = "DejaVu Sans"
-    _MONO = "DejaVu Sans Mono"
-
-F_TITLE = (_DISPLAY, 24, "bold")
-F_SUB = (_TEXT, 11)
-F_HEAD = (_DISPLAY, 11, "bold")
-F_BODY = (_TEXT, 11)
-F_BTN = (_DISPLAY, 11, "bold")
-F_BIG_BTN = (_DISPLAY, 13, "bold")
-F_MONO = (_MONO, 10)
-F_DROP = ("Segoe UI Variable Display", 14, "bold")
+STATUS_WAITING = "等待"
+STATUS_DONE = "完成"
+STATUS_FAILED = "失败"
+STATUS_STOPPED = "已停止"
 
 
 def find_deface():
     exe = shutil.which("deface")
     if exe:
         return [exe]
+    sibling = Path(sys.executable).parent / "deface"
+    if sibling.exists():
+        return [str(sibling)]
     if IS_WIN:
-        candidate = SCRIPTS_DIR / "deface.exe"
+        candidate = Path(sys.executable).parent / "Scripts" / "deface.exe"
         if candidate.exists():
             return [str(candidate)]
-    return [sys.executable, "-m", "deface"]
+    return [str(sibling)]
 
 
 def open_path(p: Path):
     """Open a folder or file with the OS default handler."""
     if IS_WIN:
-        os.startfile(str(p))  # noqa: S606
+        os_startfile(p)
     elif IS_MAC:
         subprocess.Popen(["open", str(p)])
     else:
         subprocess.Popen(["xdg-open", str(p)])
+
+
+def os_startfile(p: Path):  # separated for testability / clarity
+    import os
+    os.startfile(str(p))  # noqa: S606
 
 
 def parse_dropped(data: str):
@@ -98,11 +74,13 @@ def parse_dropped(data: str):
         if ch == "}":
             in_brace = False
             if buf:
-                paths.append(buf); buf = ""
+                paths.append(buf)
+                buf = ""
             continue
         if ch == " " and not in_brace:
             if buf:
-                paths.append(buf); buf = ""
+                paths.append(buf)
+                buf = ""
             continue
         buf += ch
     if buf:
@@ -110,228 +88,113 @@ def parse_dropped(data: str):
     return [p for p in paths if p]
 
 
-def make_card(parent, **kw):
-    return tk.Frame(parent, bg=CARD, highlightthickness=1,
-                    highlightbackground=BORDER, highlightcolor=BORDER, **kw)
-
-
-def make_btn(parent, text, command, *, kind="primary", **kw):
-    colors = {
-        "primary": (ACCENT, "#0b0b14", ACCENT_HOT),
-        "ghost":   (CARD_HI, TEXT, BORDER),
-        "danger":  (RED, "#0b0b14", "#fca5a5"),
-        "ok":      (GREEN, "#0b0b14", "#6ee7b7"),
-    }[kind]
-    bg_c, fg_c, hover = colors
-    btn = tk.Button(
-        parent, text=text, command=command,
-        bg=bg_c, fg=fg_c, activebackground=hover, activeforeground=fg_c,
-        relief="flat", bd=0, padx=18, pady=9, cursor="hand2",
-        font=kw.pop("font", F_BTN), **kw,
-    )
-    btn.bind("<Enter>", lambda _e: btn.configure(bg=hover))
-    btn.bind("<Leave>", lambda _e: btn.configure(bg=bg_c))
-    btn._base_bg = bg_c
-    return btn
+def output_for(src: Path) -> Path:
+    """Output next to the input file, never overwriting: *_anonymized.mp4, _1, _2..."""
+    out = src.parent / f"{src.stem}_anonymized{src.suffix}"
+    n = 1
+    while out.exists():
+        out = src.parent / f"{src.stem}_anonymized_{n}{src.suffix}"
+        n += 1
+    return out
 
 
 class App:
     def __init__(self, root):
         self.root = root
         root.title(WIN_TITLE)
-        root.configure(bg=BG)
-        root.geometry("820x960")
-        root.minsize(700, 720)
-
-        style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
-        style.configure("Dark.Horizontal.TProgressbar",
-                        background=ACCENT, troughcolor=CARD_HI,
-                        bordercolor=BORDER, lightcolor=ACCENT, darkcolor=ACCENT)
-        style.configure("Dark.Horizontal.TScale",
-                        background=CARD, troughcolor=CARD_HI,
-                        bordercolor=BORDER, lightcolor=ACCENT, darkcolor=ACCENT)
-        style.map("Dark.Horizontal.TScale",
-                  background=[("active", ACCENT_HOT)])
+        root.geometry("720x520")
+        root.minsize(600, 440)
 
         self.files: list[Path] = []
-        self.output_dir = StringVar(value=str(DEFAULT_OUTPUT))
-        self.keep_audio = BooleanVar(value=True)
-        self.thresh = DoubleVar(value=0.2)
-        self.mask_scale = DoubleVar(value=1.3)
+        self.statuses: dict[str, str] = {}
+        self.outputs: dict[str, str] = {}
         self.mode = StringVar(value="blur")
-        self.use_boxes = BooleanVar(value=False)
-        self.mosaic_size = StringVar(value="20")
-        self.log_q: queue.Queue = queue.Queue()
+        self.thresh = DoubleVar(value=0.2)
+        self.keep_audio = BooleanVar(value=True)
+        self.ui_q: queue.Queue = queue.Queue()
         self.worker: threading.Thread | None = None
         self.stop_flag = threading.Event()
         self.current_proc: subprocess.Popen | None = None
 
         self._build_ui()
-        self.root.after(80, self._drain_log)
+        self.root.after(100, self._drain_ui)
 
     def _build_ui(self):
         root = self.root
 
-        # ── header ──
-        header = tk.Frame(root, bg=BG)
-        header.pack(fill="x", padx=22, pady=(20, 8))
-        tk.Label(header, text="blur faces.", bg=BG, fg=TEXT,
-                 font=F_TITLE).pack(side="left")
-        tk.Label(header, text="  free  •  offline  •  no upload",
-                 bg=BG, fg=ACCENT, font=F_HEAD).pack(side="left", pady=(14, 0))
-
-        tk.Label(root, text="drag a video. blur every face. that's it.",
-                 bg=BG, fg=DIM, font=F_SUB).pack(anchor="w", padx=24, pady=(0, 14))
-
-        # ── drop zone ──
-        drop_outer = tk.Frame(root, bg=ACCENT, padx=2, pady=2)
-        drop_outer.pack(fill="x", padx=22, pady=(0, 10))
-        drop = tk.Frame(drop_outer, bg=CARD)
-        drop.pack(fill="both", expand=True)
-        self.drop_label = tk.Label(
-            drop,
-            text=("drop ur vids here\n— or click 'add files' below —"
-                  if DND_AVAILABLE else
-                  "drag-drop unavailable — use 'add files' below"),
-            bg=CARD, fg=TEXT, font=F_DROP,
-            anchor="center", justify="center", pady=34,
+        # Drop zone
+        drop_frame = ttk.LabelFrame(root, text="视频")
+        drop_frame.pack(fill="x", padx=12, pady=(12, 6))
+        self.drop_label = ttk.Label(
+            drop_frame,
+            text=("将视频拖到这里，或点击“添加视频”" if DND_AVAILABLE
+                  else "拖放不可用，请点击“添加视频”"),
+            anchor="center",
+            padding=24,
         )
-        self.drop_label.pack(fill="both", expand=True)
+        self.drop_label.pack(fill="x")
         if DND_AVAILABLE:
-            for w in (drop, self.drop_label, drop_outer):
+            for w in (drop_frame, self.drop_label):
                 w.drop_target_register(DND_FILES)
                 w.dnd_bind("<<Drop>>", self._on_drop)
 
-        # ── queue card ──
-        q_card = make_card(root)
-        q_card.pack(fill="x", padx=22, pady=8)
-        tk.Label(q_card, text="queue", bg=CARD, fg=PINK,
-                 font=F_HEAD).pack(anchor="w", padx=14, pady=(10, 4))
-        self.listbox = ScrolledText(
-            q_card, height=4, wrap="none",
-            bg=CARD_HI, fg=TEXT, insertbackground=TEXT,
-            relief="flat", bd=0, font=F_MONO,
-            highlightthickness=1, highlightbackground=BORDER,
+        # Options
+        opts = ttk.LabelFrame(root, text="选项")
+        opts.pack(fill="x", padx=12, pady=6)
+        ttk.Label(opts, text="模式:").grid(row=0, column=0, sticky="w", padx=8, pady=6)
+        self.mode_box = ttk.Combobox(
+            opts, textvariable=self.mode, values=["blur", "mosaic", "solid"],
+            state="readonly", width=10,
         )
-        self.listbox.pack(fill="x", padx=14, pady=(0, 8))
-        self.listbox.configure(state=DISABLED)
+        self.mode_box.grid(row=0, column=1, sticky="w", pady=6)
+        self.keep_check = ttk.Checkbutton(opts, text="保留音频", variable=self.keep_audio)
+        self.keep_check.grid(row=0, column=2, sticky="w", padx=16, pady=6)
 
-        qbtn = tk.Frame(q_card, bg=CARD)
-        qbtn.pack(fill="x", padx=12, pady=(0, 12))
-        make_btn(qbtn, "+ add files", self._pick_files, kind="ghost").pack(side="left", padx=4)
-        make_btn(qbtn, "clear", self._clear_queue, kind="ghost").pack(side="left", padx=4)
+        ttk.Label(opts, text="检测阈值:").grid(row=1, column=0, sticky="w", padx=8, pady=(0, 8))
+        self.thresh_scale = ttk.Scale(opts, from_=0.05, to=0.6,
+                                     variable=self.thresh, orient="horizontal")
+        self.thresh_scale.grid(row=1, column=1, sticky="ew", pady=(0, 8))
+        self.thresh_label = ttk.Label(opts, text=f"{self.thresh.get():.2f}", width=6)
+        self.thresh_label.grid(row=1, column=2, sticky="w", padx=8, pady=(0, 8))
+        opts.columnconfigure(1, weight=1)
+        self.thresh.trace_add("write", lambda *_: self.thresh_label.config(
+            text=f"{self.thresh.get():.2f}"))
 
-        # ── options card ──
-        opts = make_card(root)
-        opts.pack(fill="x", padx=22, pady=8)
-        tk.Label(opts, text="vibe check", bg=CARD, fg=PINK,
-                 font=F_HEAD).pack(anchor="w", padx=14, pady=(10, 6))
+        # Queue
+        q_frame = ttk.LabelFrame(root, text="队列（双击打开所在目录）")
+        q_frame.pack(fill="both", expand=True, padx=12, pady=6)
+        self.tree = ttk.Treeview(q_frame, columns=("status", "output"),
+                                 show="tree headings", height=8)
+        self.tree.heading("#0", text="文件")
+        self.tree.heading("status", text="状态")
+        self.tree.heading("output", text="输出")
+        self.tree.column("#0", width=260)
+        self.tree.column("status", width=130, anchor="center")
+        self.tree.column("output", width=260)
+        vsb = ttk.Scrollbar(q_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.tree.bind("<Double-1>", self._on_double_click)
 
-        # mode pills
-        modes = tk.Frame(opts, bg=CARD)
-        modes.pack(fill="x", padx=12, pady=(0, 8))
-        tk.Label(modes, text="mode:", bg=CARD, fg=DIM, font=F_BODY).pack(side="left", padx=(4, 8))
-        for v, label in (("blur", "🫧 blur"), ("mosaic", "🟪 mosaic"),
-                         ("solid", "⬛ solid"), ("none", "👀 detect")):
-            rb = tk.Radiobutton(
-                modes, text=label, variable=self.mode, value=v,
-                indicatoron=False, bd=0, padx=14, pady=7,
-                bg=CARD_HI, fg=TEXT,
-                selectcolor=ACCENT,
-                activebackground=ACCENT_HOT, activeforeground="#0b0b14",
-                font=F_BTN, relief="flat", cursor="hand2",
-                tristatevalue="x_unused",
-            )
-            rb.pack(side="left", padx=3)
+        qbtn = ttk.Frame(root)
+        qbtn.pack(fill="x", padx=12, pady=(0, 6))
+        ttk.Button(qbtn, text="添加视频", command=self._pick_files).pack(side="left")
+        ttk.Button(qbtn, text="移除所选", command=self._remove_selected).pack(side="left", padx=6)
+        ttk.Button(qbtn, text="清空", command=self._clear_queue).pack(side="left")
 
-        # toggles
-        toggles = tk.Frame(opts, bg=CARD)
-        toggles.pack(fill="x", padx=12, pady=4)
-        for var, label in (
-            (self.keep_audio, "🔊 keep audio"),
-            (self.use_boxes, "▭ box masks"),
-        ):
-            cb = tk.Checkbutton(
-                toggles, text=label, variable=var,
-                bg=CARD, fg=TEXT, selectcolor=CARD_HI,
-                activebackground=CARD, activeforeground=ACCENT,
-                font=F_BODY, bd=0, relief="flat", cursor="hand2",
-            )
-            cb.pack(side="left", padx=8)
-
-        # sliders
-        for label, var, lo, hi, fmt in (
-            ("face detection sensitivity", self.thresh, 0.05, 0.6, "{:.2f}"),
-            ("blur cushion (how much around the face)", self.mask_scale, 1.0, 2.5, "{:.2f}"),
-        ):
-            row = tk.Frame(opts, bg=CARD)
-            row.pack(fill="x", padx=14, pady=4)
-            tk.Label(row, text=label, bg=CARD, fg=DIM, font=F_BODY).pack(side="left")
-            value_lbl = tk.Label(row, text=fmt.format(var.get()), width=6,
-                                 bg=CARD, fg=ACCENT, font=F_HEAD)
-            value_lbl.pack(side="right")
-            ttk.Scale(row, from_=lo, to=hi, variable=var, orient="horizontal",
-                      length=220, style="Dark.Horizontal.TScale").pack(side="right", padx=10)
-            var.trace_add("write", lambda *_x, lbl=value_lbl, v=var, f=fmt: lbl.config(text=f.format(v.get())))
-
-        # mosaic size + output folder
-        misc = tk.Frame(opts, bg=CARD)
-        misc.pack(fill="x", padx=14, pady=(8, 4))
-        tk.Label(misc, text="mosaic block size:", bg=CARD, fg=DIM, font=F_BODY).pack(side="left")
-        tk.Entry(misc, textvariable=self.mosaic_size, width=5,
-                 bg=CARD_HI, fg=TEXT, insertbackground=TEXT,
-                 relief="flat", font=F_BODY,
-                 highlightthickness=1, highlightbackground=BORDER,
-                 highlightcolor=ACCENT).pack(side="left", padx=8)
-
-        outrow = tk.Frame(opts, bg=CARD)
-        outrow.pack(fill="x", padx=14, pady=(6, 14))
-        tk.Label(outrow, text="output folder:", bg=CARD, fg=DIM,
-                 font=F_BODY).pack(side="left")
-        tk.Entry(outrow, textvariable=self.output_dir,
-                 bg=CARD_HI, fg=TEXT, insertbackground=TEXT,
-                 relief="flat", font=F_BODY,
-                 highlightthickness=1, highlightbackground=BORDER,
-                 highlightcolor=ACCENT).pack(side="left", fill="x", expand=True, padx=8)
-        make_btn(outrow, "browse", self._pick_outdir, kind="ghost").pack(side="left")
-
-        # ── action bar ──
-        action = tk.Frame(root, bg=BG)
-        action.pack(fill="x", padx=22, pady=(6, 4))
-        self.start_btn = make_btn(action, "✨  blur it  ✨", self._start,
-                                  kind="primary", font=F_BIG_BTN)
+        # Actions + status bar
+        action = ttk.Frame(root)
+        action.pack(fill="x", padx=12, pady=(0, 4))
+        self.start_btn = ttk.Button(action, text="开始", command=self._start)
         self.start_btn.pack(side="left")
-        self.stop_btn = make_btn(action, "stop", self._stop, kind="danger")
-        self.stop_btn.pack(side="left", padx=8)
-        self.stop_btn.configure(state=DISABLED)
-        make_btn(action, "open output", self._open_outdir, kind="ghost").pack(side="left", padx=4)
-        self.status = tk.Label(action, text="idle. drop a vid 👇", bg=BG, fg=DIM, font=F_BODY)
-        self.status.pack(side="right")
+        self.stop_btn = ttk.Button(action, text="停止", command=self._stop, state="disabled")
+        self.stop_btn.pack(side="left", padx=6)
 
-        # progress
-        self.progress = ttk.Progressbar(root, mode="determinate", maximum=100,
-                                        style="Dark.Horizontal.TProgressbar")
-        self.progress.pack(fill="x", padx=22, pady=(4, 8))
+        self.status = ttk.Label(root, text="就绪", anchor="w")
+        self.status.pack(fill="x", padx=14, pady=(0, 12))
 
-        # log
-        log_card = make_card(root)
-        log_card.pack(fill="both", expand=True, padx=22, pady=(4, 18))
-        tk.Label(log_card, text="what's happening", bg=CARD, fg=PINK,
-                 font=F_HEAD).pack(anchor="w", padx=14, pady=(10, 4))
-        self.log = ScrolledText(
-            log_card, height=10, wrap="word",
-            bg=CARD_HI, fg=TEXT, insertbackground=TEXT,
-            relief="flat", bd=0, font=F_MONO,
-            highlightthickness=1, highlightbackground=BORDER,
-        )
-        self.log.pack(fill="both", expand=True, padx=14, pady=(0, 12))
-        self.log.configure(state=DISABLED)
-
-    # ── interactions ──
+    # -- queue --
     def _on_drop(self, event):
         for p in parse_dropped(event.data):
             self._add_path(Path(p))
@@ -339,72 +202,102 @@ class App:
 
     def _pick_files(self):
         paths = filedialog.askopenfilenames(
-            title="pick a video",
-            filetypes=[("videos", " ".join(f"*{e}" for e in sorted(VIDEO_EXTS))), ("all files", "*.*")],
+            title="选择视频",
+            filetypes=[("视频", " ".join(f"*{e}" for e in sorted(VIDEO_EXTS))),
+                       ("所有文件", "*.*")],
         )
         for p in paths:
             self._add_path(Path(p))
         self._refresh_queue()
 
-    def _pick_outdir(self):
-        d = filedialog.askdirectory(initialdir=self.output_dir.get() or str(HERE))
-        if d:
-            self.output_dir.set(d)
-
-    def _open_outdir(self):
-        d = Path(self.output_dir.get())
-        d.mkdir(parents=True, exist_ok=True)
-        open_path(d)
-
     def _add_path(self, p: Path):
         if p.is_dir():
-            for child in p.iterdir():
+            for child in sorted(p.iterdir()):
                 if child.suffix.lower() in VIDEO_EXTS:
-                    self.files.append(child)
-        elif p.suffix.lower() in VIDEO_EXTS:
-            self.files.append(p)
+                    self._append_file(child)
+            return
+        if p.suffix.lower() in VIDEO_EXTS:
+            self._append_file(p)
         else:
-            self._log(f"skipped (not a video): {p}")
+            self.status.config(text=f"已跳过（非视频）: {p.name}")
 
-    def _clear_queue(self):
-        self.files.clear()
-        self._refresh_queue()
+    def _append_file(self, p: Path):
+        key = str(p)
+        if key not in self.statuses:
+            self.files.append(p)
+            self.statuses[key] = STATUS_WAITING
+            self.outputs[key] = ""
 
     def _refresh_queue(self):
-        self.listbox.config(state=NORMAL)
-        self.listbox.delete("1.0", END)
+        self.tree.delete(*self.tree.get_children())
         for f in self.files:
-            self.listbox.insert(END, f"{f}\n")
-        self.listbox.config(state=DISABLED)
-        self.status.config(text=f"{len(self.files)} in queue" if self.files else "idle. drop a vid 👇")
+            key = str(f)
+            self.tree.insert("", "end", iid=key, text=f.name,
+                             values=(self.statuses.get(key, STATUS_WAITING),
+                                     self.outputs.get(key, "")))
+        self._update_status_bar()
 
-    def _log(self, msg: str):
-        self.log_q.put(msg)
+    def _remove_selected(self):
+        for iid in self.tree.selection():
+            self.files = [f for f in self.files if str(f) != iid]
+            self.statuses.pop(iid, None)
+            self.outputs.pop(iid, None)
+        self._refresh_queue()
 
-    def _drain_log(self):
+    def _clear_queue(self):
+        if self.worker and self.worker.is_alive():
+            return
+        self.files.clear()
+        self.statuses.clear()
+        self.outputs.clear()
+        self._refresh_queue()
+
+    def _on_double_click(self, _event):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        parent = Path(sel[0]).parent
+        if parent.exists():
+            open_path(parent)
+
+    def _update_status_bar(self):
+        n = len(self.files)
+        self.status.config(text=f"共 {n} 个视频" if n else "就绪")
+
+    # -- run --
+    def _set_status(self, key: str, text: str, output: str | None = None):
+        self.ui_q.put(("row", key, text, output))
+
+    def _drain_ui(self):
         try:
             while True:
-                msg = self.log_q.get_nowait()
-                self.log.config(state=NORMAL)
-                self.log.insert(END, msg.rstrip() + "\n")
-                self.log.see(END)
-                self.log.config(state=DISABLED)
+                msg = self.ui_q.get_nowait()
+                if msg[0] == "row":
+                    _, key, text, output = msg
+                    self.statuses[key] = text
+                    if output is not None:
+                        self.outputs[key] = output
+                    if self.tree.exists(key):
+                        self.tree.set(key, "status", text)
+                        if output is not None:
+                            self.tree.set(key, "output", output)
+                elif msg[0] == "bar":
+                    self.status.config(text=msg[1])
         except queue.Empty:
             pass
-        self.root.after(80, self._drain_log)
+        self.root.after(100, self._drain_ui)
 
     def _start(self):
-        if not self.files:
-            messagebox.showinfo("nothing here", "add at least one video first ✨")
+        if self.worker and self.worker.is_alive():
             return
-        outdir = Path(self.output_dir.get())
-        outdir.mkdir(parents=True, exist_ok=True)
+        if not self.files:
+            messagebox.showinfo("提示", "请先添加至少一个视频")
+            return
         self.stop_flag.clear()
-        self.start_btn.config(state=DISABLED)
-        self.stop_btn.config(state=NORMAL)
-        self.progress["value"] = 0
+        self.start_btn.config(state="disabled")
+        self.stop_btn.config(state="normal")
         self.worker = threading.Thread(target=self._run_jobs,
-                                       args=(list(self.files), outdir), daemon=True)
+                                       args=(list(self.files),), daemon=True)
         self.worker.start()
 
     def _stop(self):
@@ -414,51 +307,42 @@ class App:
                 self.current_proc.terminate()
             except Exception:
                 pass
-        self._log("stop requested.")
-        self.status.config(text="stopping...")
+        self.ui_q.put(("bar", "正在停止…"))
 
-    def _run_jobs(self, files: list[Path], outdir: Path):
+    def _run_jobs(self, files: list[Path]):
         deface_cmd = find_deface()
         total = len(files)
         for i, f in enumerate(files, 1):
+            key = str(f)
             if self.stop_flag.is_set():
+                self._set_status(key, STATUS_STOPPED)
                 break
-            out = outdir / f"{f.stem}_anonymized{f.suffix}"
+            out = output_for(f)
             args = list(deface_cmd) + [
                 "--thresh", f"{self.thresh.get():.3f}",
-                "--mask-scale", f"{self.mask_scale.get():.3f}",
+                "--mask-scale", f"{MASK_SCALE:.3f}",
                 "--replacewith", self.mode.get(),
                 "-o", str(out),
             ]
             if self.keep_audio.get():
                 args.append("--keep-audio")
-            if self.use_boxes.get():
-                args.append("--boxes")
             if self.mode.get() == "mosaic":
-                try:
-                    int(self.mosaic_size.get())
-                    args += ["--mosaicsize", self.mosaic_size.get()]
-                except ValueError:
-                    pass
+                args += ["--mosaicsize", MOSAIC_SIZE]
             args.append(str(f))
 
-            self.root.after(0, lambda i=i, total=total, name=f.name:
-                            self.status.config(text=f"cooking [{i}/{total}] {name}"))
-            self._log(f"\n=== [{i}/{total}] {f}")
-            self._log(" ".join(f'"{a}"' if " " in a else a for a in args))
-            rc = self._run_one(args)
+            self._set_status(key, f"处理中 0% ({i}/{total})", str(out))
+            self.ui_q.put(("bar", f"正在处理 [{i}/{total}] {f.name}"))
+            rc = self._run_one(args, key, i, total)
             if rc == 0:
-                self._log(f"ok -> {out}")
+                self._set_status(key, STATUS_DONE, str(out))
             elif self.stop_flag.is_set():
-                self._log("stopped.")
+                self._set_status(key, STATUS_STOPPED, str(out))
                 break
             else:
-                self._log(f"failed (exit {rc})")
-            self.root.after(0, lambda v=(i / total) * 100: self.progress.configure(value=v))
-
+                self._set_status(key, f"{STATUS_FAILED} (exit {rc})", str(out))
         self.root.after(0, self._jobs_done)
 
-    def _run_one(self, args) -> int:
+    def _run_one(self, args, key: str, i: int, total: int) -> int:
         try:
             self.current_proc = subprocess.Popen(
                 args,
@@ -466,30 +350,28 @@ class App:
                 text=True, bufsize=1,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-        except FileNotFoundError as e:
-            self._log(f"could not launch deface: {e}")
+        except FileNotFoundError:
+            self._set_status(key, f"{STATUS_FAILED} (deface 未找到)")
             return -1
         assert self.current_proc.stdout is not None
         pct_re = re.compile(r"(\d{1,3})%")
+        last = -1
         for line in self.current_proc.stdout:
-            line = line.rstrip()
-            if not line:
-                continue
-            self._log(line)
             m = pct_re.search(line)
             if m:
                 try:
-                    pct = int(m.group(1))
-                    self.root.after(0, lambda v=pct: self.progress.configure(value=v))
+                    pct = max(0, min(100, int(m.group(1))))
                 except ValueError:
-                    pass
+                    continue
+                if pct != last:
+                    last = pct
+                    self._set_status(key, f"处理中 {pct}% ({i}/{total})")
         return self.current_proc.wait()
 
     def _jobs_done(self):
-        self.start_btn.config(state=NORMAL)
-        self.stop_btn.config(state=DISABLED)
-        self.status.config(text="done ✨")
-        self.progress["value"] = 100
+        self.start_btn.config(state="normal")
+        self.stop_btn.config(state="disabled")
+        self.ui_q.put(("bar", "完成" if not self.stop_flag.is_set() else "已停止"))
 
 
 def main():
